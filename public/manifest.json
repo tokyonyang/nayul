@@ -1,0 +1,14 @@
+{
+  "name": "나율이의 하브루타",
+  "short_name": "나율 하브루타",
+  "description": "나율이와 책 이야기를 나누는 하브루타 짝꿍",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#EAF4FB",
+  "theme_color": "#EAF4FB",
+  "lang": "ko",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
