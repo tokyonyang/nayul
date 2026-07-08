@@ -222,6 +222,29 @@ function SessionInner() {
   };
 
   // ----- 아이 말하기 STT -----
+  // 아이가 말 중간에 뜸을 들여도 끊기지 않도록:
+  // continuous + 침묵으로 인식이 끊기면 자동 재시작(전송 안 함) + 누적.
+  // 전송은 (1) 버튼을 다시 눌렀을 때 또는 (2) 말한 내용이 있고 7초간 완전 침묵일 때.
+  const talkActiveRef = useRef(false);
+  const talkFinalRef = useRef('');
+  const silenceTimerRef = useRef(null);
+  const SILENCE_SEND_MS = 7000;
+
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  const armSilenceTimer = () => {
+    clearSilenceTimer();
+    if (!talkFinalRef.current.trim()) return; // 아직 아무 말도 없으면 자동 전송 안 함
+    silenceTimerRef.current = setTimeout(() => {
+      if (talkActiveRef.current) stopListening();
+    }, SILENCE_SEND_MS);
+  };
+
   const startListening = () => {
     if (busy) return;
     window.speechSynthesis?.cancel();
@@ -231,42 +254,74 @@ function SessionInner() {
       setTypedMode(true);
       return;
     }
-    const rec = new SR();
-    recRef.current = rec;
-    rec.lang = listenLang;
-    rec.interimResults = true;
-    rec.maxAlternatives = 1;
-    let finalText = '';
-    rec.onresult = (e) => {
-      let interimText = '';
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const r = e.results[i];
-        if (r.isFinal) finalText += r[0].transcript;
-        else interimText += r[0].transcript;
-      }
-      setInterim(interimText || finalText);
-    };
-    rec.onend = () => {
-      setListening(false);
-      setInterim('');
-      if (finalText.trim()) send(finalText);
-    };
-    rec.onerror = () => {
-      setListening(false);
-      setInterim('');
-    };
+    talkActiveRef.current = true;
+    talkFinalRef.current = '';
     setListening(true);
-    rec.start();
+    setInterim('');
+
+    const run = () => {
+      if (!talkActiveRef.current) return;
+      const rec = new SR();
+      recRef.current = rec;
+      rec.lang = listenLang;
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.maxAlternatives = 1;
+      rec.onresult = (e) => {
+        let interimText = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) talkFinalRef.current += r[0].transcript + ' ';
+          else interimText += r[0].transcript;
+        }
+        setInterim((talkFinalRef.current + interimText).trim());
+        armSilenceTimer();
+      };
+      // 침묵/타임아웃으로 인식이 끊겨도 전송하지 않고 조용히 다시 듣는다
+      rec.onend = () => {
+        if (talkActiveRef.current) setTimeout(run, 200);
+      };
+      rec.onerror = (e) => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          talkActiveRef.current = false;
+          clearSilenceTimer();
+          setListening(false);
+          setInterim('');
+          setTypedMode(true);
+        }
+        // 'no-speech' 등은 onend에서 자동 재시작으로 이어짐
+      };
+      try {
+        rec.start();
+      } catch {}
+    };
+    run();
   };
 
   const stopListening = () => {
-    recRef.current?.stop();
+    talkActiveRef.current = false;
+    clearSilenceTimer();
+    try {
+      recRef.current?.stop();
+    } catch {}
+    setListening(false);
+    setInterim('');
+    const finalText = talkFinalRef.current.trim();
+    talkFinalRef.current = '';
+    if (finalText) send(finalText);
   };
 
   // ----- 종료 & 피드백 -----
   const endSession = () => {
     window.speechSynthesis?.cancel();
-    recRef.current?.stop();
+    talkActiveRef.current = false;
+    clearSilenceTimer();
+    talkFinalRef.current = '';
+    try {
+      recRef.current?.stop();
+    } catch {}
+    setListening(false);
+    setInterim('');
     const msgs = [
       ...messages,
       { role: 'user', content: '엄마: 오늘은 여기까지 할게. 나율이에게 부드럽게 짧은 마무리 인사를 해줘.' },
@@ -448,7 +503,11 @@ function SessionInner() {
                 {listening ? '👂' : '🎤'}
               </button>
               <div className="micHint">
-                {listening ? '듣고 있어요… 다 말하면 다시 눌러 주세요' : busy ? '생각하는 중…' : '버튼을 누르고 말해 보세요'}
+                {listening
+                  ? '듣는 중이에요 — 천천히 말해도 괜찮아요. 다 말하면 버튼을 눌러 주세요!'
+                  : busy
+                  ? '생각하는 중…'
+                  : '버튼을 누르고 말해 보세요'}
               </div>
             </>
           ) : (
