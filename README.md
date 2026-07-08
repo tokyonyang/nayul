@@ -30,8 +30,11 @@
 | `OPENAI_MODEL` | 기본 `gpt-4.1-mini` (생략 가능) | 선택 |
 | `SUPABASE_URL` | Supabase 프로젝트 URL | 선택 (기록 서버 저장용) |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase service_role 키 | 선택 |
+| `GOOGLE_TTS_API_KEY` | Google Cloud TTS API 키 | 선택 (한글책 목소리 품질 ↑) |
 | `NAVER_CLIENT_ID` | 네이버 개발자센터 앱 Client ID | 선택 (책 검색 정확도 ↑) |
 | `NAVER_CLIENT_SECRET` | 네이버 앱 Client Secret | 선택 |
+
+**Google TTS 키 발급**: Google Cloud Console → 프로젝트 선택 → "Cloud Text-to-Speech API" 검색 후 **사용 설정** → API 및 서비스 → 사용자 인증 정보 → **API 키 만들기**. ⚠️ 프로젝트에 **결제 계정이 연결**되어 있어야 합니다 — 예전 403 오류가 바로 결제 미연결이 원인이에요. 무료 할당량(월 백만 자 수준)이 있어 하루 한 권 사용량이면 사실상 무료입니다.
 
 책 검색은 네이버 키가 있으면 네이버 책 검색(한국 책 정확도 높음), 없으면 Google Books로 자동 폴백합니다. 네이버 키는 developers.naver.com → 애플리케이션 등록 → 검색 API 선택으로 무료 발급됩니다.
 
@@ -80,6 +83,15 @@ supabase.sql         기록 테이블 생성 SQL
 ```
 
 ## 체인지로그
+
+### v1.3.0 (2026-07-09)
+- 🔊 하이브리드 TTS: 한글책과 영어책의 목소리 엔진을 각각 설정
+  - 한글책: 기기 음성 / Google 한국어 음성(Chirp3-HD·Neural2·Wavenet 10종, 한국어 발음 최고) / OpenAI 음성
+  - 영어책: 기기 음성 / OpenAI 음성 (원어민급)
+  - Google TTS 실패 시 OpenAI → 기기 음성 순으로 자동 폴백
+  - 엄마 설정에서 조합별 ▶ 들어보기 샘플 재생 (기기 음성 샘플 포함)
+  - 새 환경변수: GOOGLE_TTS_API_KEY (선택)
+
 
 ### v1.2.0 (2026-07-09)
 - 🔊 OpenAI TTS 통합 (gpt-4o-mini-tts): 기기 음성보다 훨씬 자연스러운 AI 목소리 지원

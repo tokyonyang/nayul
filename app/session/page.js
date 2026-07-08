@@ -70,15 +70,23 @@ function browserSpeak(text, onEnd) {
   next();
 }
 
-async function speak(text, opts = {}) {
+async function speak(text, { mode, settings } = {}) {
   stopAllSpeech();
-  const { engine = 'device', voice = 'marin', mode = 'ko', onEnd } = opts;
-  if (engine === 'openai') {
+  const s = settings || {};
+  // 하이브리드: 한글책 모드와 영어책 모드의 엔진을 각각 설정
+  const engine = mode === 'en' ? s.enTts || 'device' : s.koTts || 'device';
+  const onEnd = undefined;
+  if (engine === 'google' || engine === 'openai') {
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, voice, mode }),
+        body: JSON.stringify({
+          text,
+          mode,
+          provider: engine,
+          voice: engine === 'google' ? s.googleVoice || 'ko-KR-Chirp3-HD-Aoede' : s.ttsVoice || 'marin',
+        }),
       });
       if (!res.ok) throw new Error('tts failed');
       const blob = await res.blob();
@@ -93,7 +101,7 @@ async function speak(text, opts = {}) {
       await audio.play();
       return;
     } catch {
-      // OpenAI TTS 실패 → 기기 음성으로 폴백
+      // API TTS 실패 → 기기 음성으로 폴백
     }
   }
   browserSpeak(text, onEnd);
@@ -221,8 +229,7 @@ function SessionInner() {
         return;
       }
       setMessages((m) => [...m, { role: 'assistant', content: data.text }]);
-      const cur = loadSettings();
-      speak(data.text, { engine: cur.ttsEngine || 'device', voice: cur.ttsVoice || 'marin', mode });
+      speak(data.text, { mode, settings: loadSettings() });
     } catch (e) {
       setMessages((m) => [...m, { role: 'sys', content: `⚠️ 연결에 문제가 있어요: ${e.message}` }]);
     } finally {

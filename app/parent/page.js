@@ -2,9 +2,31 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-const DEFAULTS = { think: 2, ko: 2, en: 1, depth: 'normal', ttsEngine: 'device', ttsVoice: 'marin' };
+const DEFAULTS = {
+  think: 2,
+  ko: 2,
+  en: 1,
+  depth: 'normal',
+  koTts: 'device',
+  enTts: 'device',
+  googleVoice: 'ko-KR-Chirp3-HD-Aoede',
+  ttsVoice: 'marin',
+};
 
-const VOICES = [
+const GOOGLE_VOICES = [
+  ['ko-KR-Chirp3-HD-Aoede', 'Aoede — 최신 HD, 자연스러운 여성 (추천)'],
+  ['ko-KR-Chirp3-HD-Leda', 'Leda — 최신 HD, 젊은 여성'],
+  ['ko-KR-Chirp3-HD-Kore', 'Kore — 최신 HD, 또렷한 여성'],
+  ['ko-KR-Chirp3-HD-Zephyr', 'Zephyr — 최신 HD, 밝은 여성'],
+  ['ko-KR-Chirp3-HD-Puck', 'Puck — 최신 HD, 경쾌한 남성'],
+  ['ko-KR-Chirp3-HD-Charon', 'Charon — 최신 HD, 차분한 남성'],
+  ['ko-KR-Neural2-A', 'Neural2-A — 여성 (구형, 안정적)'],
+  ['ko-KR-Neural2-B', 'Neural2-B — 여성 (구형)'],
+  ['ko-KR-Neural2-C', 'Neural2-C — 남성 (구형)'],
+  ['ko-KR-Wavenet-A', 'Wavenet-A — 여성 (가장 저렴)'],
+];
+
+const OPENAI_VOICES = [
   ['marin', 'Marin — 최고 품질 권장, 차분하고 또렷한 여성'],
   ['cedar', 'Cedar — 최고 품질 권장, 부드러운 남성'],
   ['nova', 'Nova — 밝고 경쾌한 여성'],
@@ -21,7 +43,7 @@ const VOICES = [
 ];
 
 const SAMPLE_KO = '부릉부릉! 나율아, 오늘 읽은 책에서 어떤 장면이 제일 기억나?';
-const SAMPLE_EN = "Great job, Nayul! The little bus was very fast. Why was he so happy?";
+const SAMPLE_EN = 'Great job, Nayul! The little bus was very fast. Why was he so happy?';
 
 export default function ParentPage() {
   const [s, setS] = useState(DEFAULTS);
@@ -29,26 +51,64 @@ export default function ParentPage() {
   const [playing, setPlaying] = useState(null); // 'ko' | 'en' | null
   const audioRef = useRef(null);
 
+  useEffect(() => {
+    try {
+      setS({ ...DEFAULTS, ...JSON.parse(localStorage.getItem('nayul_settings') || '{}') });
+    } catch {}
+    return () => audioRef.current?.pause();
+  }, []);
+
+  const update = (patch) => {
+    const next = { ...s, ...patch };
+    setS(next);
+    localStorage.setItem('nayul_settings', JSON.stringify(next));
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1200);
+  };
+
+  const stopSample = () => {
+    audioRef.current?.pause();
+    audioRef.current = null;
+    try {
+      window.speechSynthesis?.cancel();
+    } catch {}
+    setPlaying(null);
+  };
+
   const playSample = async (mode) => {
-    // 재생 중이면 정지
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-      if (playing === mode) {
-        setPlaying(null);
-        return;
-      }
+    if (playing) {
+      const wasSame = playing === mode;
+      stopSample();
+      if (wasSame) return;
     }
+    const engine = mode === 'en' ? s.enTts : s.koTts;
     setPlaying(mode);
+
+    // 기기 음성 샘플
+    if (engine === 'device') {
+      const u = new SpeechSynthesisUtterance(mode === 'en' ? SAMPLE_EN : SAMPLE_KO);
+      u.lang = mode === 'en' ? 'en-US' : 'ko-KR';
+      u.rate = 0.95;
+      u.onend = () => setPlaying(null);
+      window.speechSynthesis?.speak(u);
+      return;
+    }
+
+    // API 음성 샘플
     try {
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: mode === 'en' ? SAMPLE_EN : SAMPLE_KO, voice: s.ttsVoice, mode }),
+        body: JSON.stringify({
+          text: mode === 'en' ? SAMPLE_EN : SAMPLE_KO,
+          mode,
+          provider: engine,
+          voice: engine === 'google' ? s.googleVoice : s.ttsVoice,
+        }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
-        alert(d.error || '샘플 재생에 실패했어요. OPENAI_API_KEY 설정을 확인해 주세요.');
+        alert(d.error || '샘플 재생에 실패했어요. 환경변수 설정을 확인해 주세요.');
         setPlaying(null);
         return;
       }
@@ -67,24 +127,14 @@ export default function ParentPage() {
     }
   };
 
-  useEffect(() => {
-    try {
-      setS({ ...DEFAULTS, ...JSON.parse(localStorage.getItem('nayul_settings') || '{}') });
-    } catch {}
-  }, []);
-
-  const update = (patch) => {
-    const next = { ...s, ...patch };
-    setS(next);
-    localStorage.setItem('nayul_settings', JSON.stringify(next));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1200);
-  };
-
   const Sel = ({ label, field, options }) => (
     <div>
       <label className="field">{label}</label>
-      <select className="input" value={s[field]} onChange={(e) => update({ [field]: isNaN(+e.target.value) ? e.target.value : +e.target.value })}>
+      <select
+        className="input"
+        value={s[field]}
+        onChange={(e) => update({ [field]: isNaN(+e.target.value) ? e.target.value : +e.target.value })}
+      >
         {options.map(([v, t]) => (
           <option key={v} value={v}>
             {t}
@@ -145,26 +195,47 @@ export default function ParentPage() {
       </div>
 
       <div className="card stack" style={{ gap: 4, marginTop: 14 }}>
+        <strong className="display" style={{ fontSize: 18 }}>🔊 목소리 (하이브리드)</strong>
+        <p className="sub" style={{ margin: '2px 0 6px', fontSize: 13 }}>
+          한글책과 영어책의 목소리 엔진을 따로 골라요. 한국어는 Google, 영어는 OpenAI 조합을 추천해요.
+        </p>
+
         <Sel
-          label="🔊 목소리 엔진"
-          field="ttsEngine"
+          label="📖 한글책 목소리"
+          field="koTts"
           options={[
-            ['device', '기기 음성 — 무료, 기기 내장 음성 사용'],
-            ['openai', 'OpenAI 음성 — 훨씬 자연스러움 (분당 약 20원)'],
+            ['device', '기기 음성 — 무료'],
+            ['google', 'Google 한국어 음성 — 한국어 발음 최고 (추천)'],
+            ['openai', 'OpenAI 음성 — 감정 표현 풍부'],
           ]}
         />
-        <Sel label="목소리 선택 (OpenAI 음성일 때 적용)" field="ttsVoice" options={VOICES} />
+        {s.koTts === 'google' && (
+          <Sel label="Google 한국어 목소리" field="googleVoice" options={GOOGLE_VOICES} />
+        )}
+
+        <Sel
+          label="🔤 영어책 목소리"
+          field="enTts"
+          options={[
+            ['device', '기기 음성 — 무료'],
+            ['openai', 'OpenAI 음성 — 원어민급 (추천)'],
+          ]}
+        />
+        {(s.enTts === 'openai' || s.koTts === 'openai') && (
+          <Sel label="OpenAI 목소리" field="ttsVoice" options={OPENAI_VOICES} />
+        )}
+
         <div className="row" style={{ marginTop: 10 }}>
           <button className="btn" style={{ fontSize: 17, padding: '13px 10px' }} onClick={() => playSample('ko')}>
-            {playing === 'ko' ? '⏹ 정지' : '▶ 한국어 들어보기'}
+            {playing === 'ko' ? '⏹ 정지' : '▶ 한글책 들어보기'}
           </button>
           <button className="btn" style={{ fontSize: 17, padding: '13px 10px' }} onClick={() => playSample('en')}>
-            {playing === 'en' ? '⏹ 정지' : '▶ 영어 들어보기'}
+            {playing === 'en' ? '⏹ 정지' : '▶ 영어책 들어보기'}
           </button>
         </div>
         <p className="sub" style={{ margin: '8px 0 0', fontSize: 13 }}>
-          목소리를 고른 뒤 들어보기를 눌러 비교해 보세요. 엔진을 OpenAI 음성으로 바꾸면 다음 대화부터
-          적용됩니다. 나율이에게는 AI 선생님 목소리라고 알려주세요.
+          Google 음성은 GOOGLE_TTS_API_KEY 환경변수가 필요해요 (README 참고). API 호출이 실패하면
+          자동으로 다른 음성으로 대신 읽어줘요.
         </p>
       </div>
 
