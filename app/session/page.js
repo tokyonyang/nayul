@@ -14,7 +14,24 @@ function loadSettings() {
   }
 }
 
-/* ---------- TTS: 문장별 언어 감지 후 한/영 음성 자동 선택 ---------- */
+/* ---------- TTS ----------
+   엔진 1: OpenAI TTS (gpt-4o-mini-tts) — 설정에서 켜면 사용, 실패 시 기기 음성으로 자동 폴백
+   엔진 2: 기기 음성 (speechSynthesis) — 문장별 한/영 음성 자동 선택 */
+
+let currentAudio = null;
+
+function stopAllSpeech() {
+  try {
+    window.speechSynthesis?.cancel();
+  } catch {}
+  if (currentAudio) {
+    try {
+      currentAudio.pause();
+    } catch {}
+    currentAudio = null;
+  }
+}
+
 function splitSentences(text) {
   return text
     .replace(/\n+/g, ' ')
@@ -31,9 +48,8 @@ function pickVoice(lang) {
   return prefer || exact[0] || null;
 }
 
-function speak(text, onEnd) {
+function browserSpeak(text, onEnd) {
   const synth = window.speechSynthesis;
-  synth.cancel();
   const parts = splitSentences(text);
   if (!parts.length) return onEnd && onEnd();
   let i = 0;
@@ -52,6 +68,35 @@ function speak(text, onEnd) {
     synth.speak(u);
   };
   next();
+}
+
+async function speak(text, opts = {}) {
+  stopAllSpeech();
+  const { engine = 'device', voice = 'marin', mode = 'ko', onEnd } = opts;
+  if (engine === 'openai') {
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, voice, mode }),
+      });
+      if (!res.ok) throw new Error('tts failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      currentAudio = audio;
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        if (currentAudio === audio) currentAudio = null;
+        onEnd && onEnd();
+      };
+      await audio.play();
+      return;
+    } catch {
+      // OpenAI TTS 실패 → 기기 음성으로 폴백
+    }
+  }
+  browserSpeak(text, onEnd);
 }
 
 function getSR() {
@@ -97,7 +142,7 @@ function SessionInner() {
       if (b) setBookInfo(JSON.parse(b));
     } catch {}
     return () => {
-      window.speechSynthesis?.cancel();
+      stopAllSpeech();
       stopEar();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -176,7 +221,8 @@ function SessionInner() {
         return;
       }
       setMessages((m) => [...m, { role: 'assistant', content: data.text }]);
-      speak(data.text);
+      const cur = loadSettings();
+      speak(data.text, { engine: cur.ttsEngine || 'device', voice: cur.ttsVoice || 'marin', mode });
     } catch (e) {
       setMessages((m) => [...m, { role: 'sys', content: `⚠️ 연결에 문제가 있어요: ${e.message}` }]);
     } finally {
@@ -215,7 +261,7 @@ function SessionInner() {
   const send = (text) => {
     const t = text.trim();
     if (!t || busy) return;
-    window.speechSynthesis?.cancel();
+    stopAllSpeech();
     const msgs = [...messages, { role: 'user', content: t }];
     setMessages(msgs);
     callChat(historyForApi(msgs));
@@ -247,7 +293,7 @@ function SessionInner() {
 
   const startListening = () => {
     if (busy) return;
-    window.speechSynthesis?.cancel();
+    stopAllSpeech();
     const SR = getSR();
     if (!SR) {
       alert('이 브라우저는 음성 인식을 지원하지 않아요. 크롬(안드로이드)이나 사파리(아이폰)에서 열어 주세요. 키보드 입력으로 대신할 수 있어요.');
@@ -313,7 +359,7 @@ function SessionInner() {
 
   // ----- 종료 & 피드백 -----
   const endSession = () => {
-    window.speechSynthesis?.cancel();
+    stopAllSpeech();
     talkActiveRef.current = false;
     clearSilenceTimer();
     talkFinalRef.current = '';
