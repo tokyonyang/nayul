@@ -6,10 +6,38 @@ import { useRouter } from 'next/navigation';
 export default function Home() {
   const router = useRouter();
   const [title, setTitle] = useState('');
+  const [extra, setExtra] = useState('');
+  const [results, setResults] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [searching, setSearching] = useState(false);
+
+  const search = async () => {
+    if (!title.trim()) return;
+    setSearching(true);
+    setSelected(null);
+    try {
+      const res = await fetch('/api/book', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title.trim(), extra: extra.trim() }),
+      });
+      const data = await res.json();
+      setResults(data.results || []);
+    } catch {
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
 
   const start = (mode) => {
+    try {
+      if (selected) sessionStorage.setItem('nayul_book', JSON.stringify(selected));
+      else sessionStorage.removeItem('nayul_book');
+    } catch {}
     const q = new URLSearchParams({ mode });
-    if (title.trim()) q.set('book', title.trim());
+    const t = selected?.title || title.trim();
+    if (t) q.set('book', t);
     router.push(`/session?${q.toString()}`);
   };
 
@@ -25,21 +53,86 @@ export default function Home() {
     <div className="wrap">
       <div style={{ fontSize: 54, textAlign: 'center', marginTop: 18 }}>🚌📚</div>
       <h1 className="center">나율이의 하브루타</h1>
-      <p className="sub center">오늘은 어떤 책을 읽었어?</p>
+      <p className="sub center">오늘은 어떤 책을 읽을까?</p>
 
       <div className="stack" style={{ flex: 1 }}>
         <input
           className="input"
-          placeholder="책 제목 (안 써도 괜찮아요)"
+          placeholder="책 제목"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && search()}
         />
+        <div className="row">
+          <input
+            className="input"
+            placeholder="출판사·시리즈·저자 (같은 제목 구분용)"
+            value={extra}
+            onChange={(e) => setExtra(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && search()}
+          />
+          <button
+            className="btn"
+            style={{ width: 'auto', padding: '13px 18px', fontSize: 17, flexShrink: 0 }}
+            onClick={search}
+            disabled={searching || !title.trim()}
+          >
+            {searching ? <span className="spin" /> : '🔍 찾기'}
+          </button>
+        </div>
+
+        {results && results.length === 0 && (
+          <p className="sub center" style={{ margin: 0 }}>
+            검색 결과가 없어요. 그래도 시작할 수 있어요 — AI가 귀 쫑긋 세우고 같이 들을게요!
+          </p>
+        )}
+
+        {results && results.length > 0 && (
+          <div className="stack" style={{ gap: 8 }}>
+            <p className="sub" style={{ margin: 0 }}>우리가 읽은 책을 골라 주세요:</p>
+            {results.map((b, i) => (
+              <button
+                key={i}
+                className="card bookCard"
+                style={{
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  border: selected === b ? '3px solid var(--grass)' : '3px solid transparent',
+                  display: 'flex',
+                  gap: 12,
+                  alignItems: 'center',
+                  padding: 12,
+                }}
+                onClick={() => setSelected(selected === b ? null : b)}
+              >
+                {b.thumbnail ? (
+                  <img src={b.thumbnail} alt="" style={{ width: 44, borderRadius: 6, flexShrink: 0 }} />
+                ) : (
+                  <span style={{ fontSize: 30 }}>📕</span>
+                )}
+                <span style={{ minWidth: 0 }}>
+                  <strong style={{ display: 'block', fontSize: 15 }}>{b.title}</strong>
+                  <span className="sub" style={{ fontSize: 13, margin: 0 }}>
+                    {[b.author, b.publisher].filter(Boolean).join(' · ')}
+                  </span>
+                </span>
+                {selected === b && <span style={{ marginLeft: 'auto', fontSize: 20 }}>✅</span>}
+              </button>
+            ))}
+          </div>
+        )}
+
         <button className="btn big yellow" onClick={() => start('ko')}>
           📖 한글책 이야기하기
         </button>
         <button className="btn big" onClick={() => start('en')}>
           🔤 English Book!
         </button>
+        {selected?.description && (
+          <p className="sub center" style={{ margin: 0 }}>
+            ✅ 책 소개를 찾았어요 — 읽기를 건너뛰고 바로 이야기할 수도 있어요!
+          </p>
+        )}
       </div>
 
       <div className="row" style={{ justifyContent: 'center', marginTop: 24 }}>

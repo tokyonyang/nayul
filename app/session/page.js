@@ -1,9 +1,10 @@
 'use client';
 
 import { Suspense, useEffect, useRef, useState } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 
 const DEFAULT_SETTINGS = { think: 2, ko: 2, en: 1, depth: 'normal' };
+const TRANSCRIPT_LIMIT = 15000; // 전사 최대 길이 (토큰 보호)
 
 function loadSettings() {
   try {
@@ -53,15 +54,21 @@ function speak(text, onEnd) {
   next();
 }
 
+function getSR() {
+  return typeof window !== 'undefined'
+    ? window.SpeechRecognition || window.webkitSpeechRecognition
+    : null;
+}
+
 function SessionInner() {
-  const router = useRouter();
   const params = useSearchParams();
   const mode = params.get('mode') === 'en' ? 'en' : 'ko';
   const bookTitle = params.get('book') || '';
 
   const [phase, setPhase] = useState('reading'); // reading | talk | ended
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
-  const [messages, setMessages] = useState([]); // {role, content}
+  const [bookInfo, setBookInfo] = useState(null);
+  const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
@@ -73,25 +80,95 @@ function SessionInner() {
   const recRef = useRef(null);
   const chatRef = useRef(null);
 
+  // ----- 같이 듣기 (읽어주기 전사) -----
+  const [earOn, setEarOn] = useState(false);
+  const [earSupported, setEarSupported] = useState(true);
+  const [liveHeard, setLiveHeard] = useState('');
+  const transcriptRef = useRef('');
+  const earRecRef = useRef(null);
+  const earActiveRef = useRef(false);
+
   useEffect(() => {
     setSettings(loadSettings());
-    // 일부 브라우저는 voices를 늦게 로드
     window.speechSynthesis?.getVoices();
+    if (!getSR()) setEarSupported(false);
+    try {
+      const b = sessionStorage.getItem('nayul_book');
+      if (b) setBookInfo(JSON.parse(b));
+    } catch {}
+    return () => {
+      window.speechSynthesis?.cancel();
+      stopEar();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, interim]);
 
-  useEffect(() => () => window.speechSynthesis?.cancel(), []);
+  const startEar = () => {
+    const SR = getSR();
+    if (!SR) {
+      setEarSupported(false);
+      return;
+    }
+    earActiveRef.current = true;
+    setEarOn(true);
+    const run = () => {
+      if (!earActiveRef.current) return;
+      const rec = new SR();
+      earRecRef.current = rec;
+      rec.lang = mode === 'en' ? 'en-US' : 'ko-KR';
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (e) => {
+        let interimText = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) transcriptRef.current += r[0].transcript + ' ';
+          else interimText += r[0].transcript;
+        }
+        if (transcriptRef.current.length > TRANSCRIPT_LIMIT + 3000) {
+          transcriptRef.current = transcriptRef.current.slice(-TRANSCRIPT_LIMIT);
+        }
+        const tail = (transcriptRef.current + interimText).slice(-70);
+        setLiveHeard(tail);
+      };
+      // 모바일에서 인식이 주기적으로 끊기므로 자동 재시작
+      rec.onend = () => {
+        if (earActiveRef.current) setTimeout(run, 250);
+      };
+      rec.onerror = (e) => {
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          earActiveRef.current = false;
+          setEarOn(false);
+          setEarSupported(false);
+        }
+      };
+      try {
+        rec.start();
+      } catch {}
+    };
+    run();
+  };
 
+  const stopEar = () => {
+    earActiveRef.current = false;
+    setEarOn(false);
+    try {
+      earRecRef.current?.stop();
+    } catch {}
+  };
+
+  // ----- 대화 -----
   const callChat = async (history) => {
     setBusy(true);
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history, mode, bookTitle, settings: loadSettings() }),
+        body: JSON.stringify({ history, mode, bookTitle, bookInfo, settings: loadSettings() }),
       });
       const data = await res.json();
       if (data.error) {
@@ -110,12 +187,27 @@ function SessionInner() {
   const historyForApi = (msgs) => msgs.filter((m) => m.role === 'user' || m.role === 'assistant');
 
   const finishReading = () => {
+    stopEar();
     setPhase('talk');
-    const first = {
-      role: 'user',
-      content: mode === 'en' ? 'We finished the book. Now you can talk.' : '책 다 읽었어. 이제 이야기해도 돼.',
-    };
-    const msgs = [first];
+    const heard = transcriptRef.current.trim().slice(-TRANSCRIPT_LIMIT);
+    let content =
+      mode === 'en' ? 'We finished the book. Now you can talk.' : '책 다 읽었어. 이제 이야기해도 돼.';
+    if (heard.length > 30) {
+      content += `\n\n[앱 자동 첨부: 엄마가 방금 소리 내어 읽어준 내용의 음성 인식 전사. 인식 오류가 섞여 있을 수 있으니 문맥으로 이해하고, 이 내용을 책의 실제 내용으로 사용해 질문할 것]\n${heard}`;
+    }
+    const msgs = [{ role: 'user', content }];
+    setMessages(msgs);
+    callChat(msgs);
+  };
+
+  const skipReading = () => {
+    stopEar();
+    setPhase('talk');
+    const content =
+      mode === 'en'
+        ? 'We already know this book well. Please start the havruta talk based on the verified book info.'
+        : '이 책은 우리가 이미 잘 아는 책이야. 검색으로 확인된 책 정보를 바탕으로 바로 하브루타 대화를 시작해 줘.';
+    const msgs = [{ role: 'user', content }];
     setMessages(msgs);
     callChat(msgs);
   };
@@ -129,11 +221,11 @@ function SessionInner() {
     callChat(historyForApi(msgs));
   };
 
-  /* ---------- STT ---------- */
+  // ----- 아이 말하기 STT -----
   const startListening = () => {
     if (busy) return;
     window.speechSynthesis?.cancel();
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const SR = getSR();
     if (!SR) {
       alert('이 브라우저는 음성 인식을 지원하지 않아요. 크롬(안드로이드)이나 사파리(아이폰)에서 열어 주세요. 키보드 입력으로 대신할 수 있어요.');
       setTypedMode(true);
@@ -171,7 +263,7 @@ function SessionInner() {
     recRef.current?.stop();
   };
 
-  /* ---------- 종료 & 피드백 ---------- */
+  // ----- 종료 & 피드백 -----
   const endSession = () => {
     window.speechSynthesis?.cancel();
     recRef.current?.stop();
@@ -243,13 +335,39 @@ function SessionInner() {
           <a href="/" className="title">← 나율이의 하브루타</a>
           <span className="badge">{mode === 'en' ? 'English' : '한글책'}</span>
         </div>
-        <div className="readingArt">🤫📖</div>
+        <div className="readingArt">{earOn ? '👂📖' : '🤫📖'}</div>
         <h1 className="center">{bookTitle || '오늘의 책'}</h1>
+        {bookInfo && (
+          <p className="sub center" style={{ marginTop: -2 }}>
+            {[bookInfo.author, bookInfo.publisher].filter(Boolean).join(' · ')}
+          </p>
+        )}
         <p className="sub center">
           엄마가 책을 읽어주는 시간이에요.
           <br />
-          다 읽으면 아래 버튼을 눌러 주세요!
+          {earSupported
+            ? '아래 귀 버튼을 켜면 AI가 함께 들어요!'
+            : '이 브라우저는 같이 듣기를 지원하지 않아요.'}
         </p>
+
+        {earSupported && (
+          <div className="card center" style={{ marginBottom: 14 }}>
+            <button className={`btn ${earOn ? 'red' : 'green'}`} onClick={earOn ? stopEar : startEar}>
+              {earOn ? '👂 듣는 중… (탭하면 멈춤)' : '👂 같이 듣기 시작'}
+            </button>
+            {earOn && (
+              <p className="sub" style={{ margin: '10px 0 0', minHeight: 20, fontStyle: 'italic' }}>
+                {liveHeard ? `…${liveHeard}` : '조용히 귀 기울이고 있어요'}
+              </p>
+            )}
+            {!earOn && transcriptRef.current.length > 30 && (
+              <p className="sub" style={{ margin: '10px 0 0' }}>
+                지금까지 {transcriptRef.current.length}자를 들었어요 ✓
+              </p>
+            )}
+          </div>
+        )}
+
         <div className="row" style={{ justifyContent: 'center', marginBottom: 20 }}>
           {[
             ['short', '오늘 짧게'],
@@ -262,9 +380,16 @@ function SessionInner() {
           ))}
         </div>
         <div style={{ flex: 1 }} />
-        <button className="btn big yellow" onClick={finishReading}>
-          다 읽었어! 이제 얘기하자 🎉
-        </button>
+        <div className="stack">
+          <button className="btn big yellow" onClick={finishReading}>
+            다 읽었어! 이제 얘기하자 🎉
+          </button>
+          {bookInfo?.description && bookInfo.description.length > 50 && (
+            <button className="btn" onClick={skipReading}>
+              ⏭️ 이미 잘 아는 책 — 읽기 없이 바로 이야기
+            </button>
+          )}
+        </div>
       </div>
     );
   }
@@ -303,16 +428,10 @@ function SessionInner() {
         <div className="micZone">
           {mode === 'en' && (
             <div className="row">
-              <button
-                className={`chip ${listenLang === 'en-US' ? 'on' : ''}`}
-                onClick={() => setListenLang('en-US')}
-              >
+              <button className={`chip ${listenLang === 'en-US' ? 'on' : ''}`} onClick={() => setListenLang('en-US')}>
                 🎧 English
               </button>
-              <button
-                className={`chip ${listenLang === 'ko-KR' ? 'on' : ''}`}
-                onClick={() => setListenLang('ko-KR')}
-              >
+              <button className={`chip ${listenLang === 'ko-KR' ? 'on' : ''}`} onClick={() => setListenLang('ko-KR')}>
                 🎧 한국어로 말할래
               </button>
             </div>
