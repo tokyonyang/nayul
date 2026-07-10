@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { libSaveTranscript } from '../../lib/libraryClient';
+import { syncSettingsFromServer, saveSettings } from '../../lib/settingsClient';
 
 const DEFAULT_SETTINGS = { think: 2, ko: 2, en: 1, depth: 'normal' };
 const TRANSCRIPT_LIMIT = 15000; // 전사 최대 길이 (토큰 보호)
@@ -20,6 +21,24 @@ function loadSettings() {
    엔진 2: 기기 음성 (speechSynthesis) — 문장별 한/영 음성 자동 선택 */
 
 let currentAudio = null;
+let sharedAudio = null; // iOS 자동재생 정책 대응: 첫 터치에 잠금 해제한 엘리먼트를 재사용
+let audioUnlocked = false;
+
+function unlockAudio() {
+  try {
+    if (!sharedAudio && typeof Audio !== 'undefined') sharedAudio = new Audio();
+    if (!sharedAudio || audioUnlocked) return;
+    // 무음 wav를 사용자 제스처 안에서 재생해 오디오 잠금 해제
+    sharedAudio.src =
+      'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
+    sharedAudio
+      .play()
+      .then(() => {
+        audioUnlocked = true;
+      })
+      .catch(() => {});
+  } catch {}
+}
 
 function stopAllSpeech() {
   try {
@@ -92,7 +111,9 @@ async function speak(text, { mode, settings } = {}) {
       if (!res.ok) throw new Error('tts failed');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
+      if (!sharedAudio && typeof Audio !== 'undefined') sharedAudio = new Audio();
+      const audio = sharedAudio;
+      audio.src = url;
       currentAudio = audio;
       audio.onended = () => {
         URL.revokeObjectURL(url);
@@ -165,6 +186,8 @@ function SessionInner() {
 
   useEffect(() => {
     setSettings(loadSettings());
+    // 서버에 저장된 설정이 있으면 이 기기에 반영 (기기 변경 대응)
+    syncSettingsFromServer().then((s) => setSettings(s));
     window.speechSynthesis?.getVoices();
     if (!getSR()) setEarSupported(false);
     try {
@@ -310,6 +333,7 @@ function SessionInner() {
   const historyForApi = (msgs) => msgs.filter((m) => m.role === 'user' || m.role === 'assistant');
 
   const finishReading = () => {
+    unlockAudio();
     stopEar();
     holdMicPermission();
     setPhase('talk');
@@ -333,6 +357,7 @@ function SessionInner() {
   };
 
   const skipReading = () => {
+    unlockAudio();
     stopEar();
     holdMicPermission();
     setPhase('talk');
@@ -401,6 +426,7 @@ function SessionInner() {
 
   const startListening = async () => {
     if (busy) return;
+    unlockAudio();
     stopAllSpeech();
     const SR = getSR();
     if (!SR) {
@@ -505,6 +531,7 @@ function SessionInner() {
 
   const startRecording = async () => {
     if (busy || transcribing) return;
+    unlockAudio();
     stopAllSpeech();
     if (typeof MediaRecorder === 'undefined') {
       alert('이 브라우저는 녹음을 지원하지 않아요. 설정에서 인식 방식을 브라우저 인식으로 바꿔 주세요.');
@@ -525,6 +552,8 @@ function SessionInner() {
     mr.onstop = async () => {
       clearTimeout(recTimerRef.current);
       setRecording(false);
+      // iOS는 마이크 세션이 열려 있으면 소리가 수화부(작은 스피커)로 빠지거나 묵음 처리됨
+      if (isIOS) releaseMic();
       const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
       if (blob.size < 3000) return; // 너무 짧은 녹음은 무시
       setTranscribing(true);
@@ -615,6 +644,7 @@ function SessionInner() {
     try {
       if (earMediaRef.current?.state === 'recording') earMediaRef.current.stop();
     } catch {}
+    if (isIOS) setTimeout(releaseMic, 300); // 마지막 청크 수집 후 해제
   };
 
   const earStart = sttMode === 'whisper' ? startEarWhisper : startEar;
@@ -693,8 +723,8 @@ function SessionInner() {
 
   const setDepth = (d) => {
     const s = { ...loadSettings(), depth: d };
-    localStorage.setItem('nayul_settings', JSON.stringify(s));
     setSettings(s);
+    saveSettings(s); // 로컬 + 서버 동시 저장
   };
 
   /* ================= RENDER ================= */

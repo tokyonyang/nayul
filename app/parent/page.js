@@ -1,18 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import { DEFAULT_SETTINGS, getLocalSettings, syncSettingsFromServer, saveSettings } from '../../lib/settingsClient';
 
-const DEFAULTS = {
-  think: 2,
-  ko: 2,
-  en: 1,
-  depth: 'normal',
-  stt: 'auto',
-  koTts: 'device',
-  enTts: 'device',
-  googleVoice: 'ko-KR-Chirp3-HD-Aoede',
-  ttsVoice: 'marin',
-};
+const DEFAULTS = DEFAULT_SETTINGS;
 
 const GOOGLE_VOICES = [
   ['ko-KR-Chirp3-HD-Aoede', 'Aoede — 최신 HD, 자연스러운 여성 (추천)'],
@@ -52,19 +43,32 @@ export default function ParentPage() {
   const [playing, setPlaying] = useState(null); // 'ko' | 'en' | null
   const audioRef = useRef(null);
 
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => {
-    try {
-      setS({ ...DEFAULTS, ...JSON.parse(localStorage.getItem('nayul_settings') || '{}') });
-    } catch {}
+    setS(getLocalSettings());
+    syncSettingsFromServer().then((srv) => setS(srv));
     return () => audioRef.current?.pause();
   }, []);
 
   const update = (patch) => {
-    const next = { ...s, ...patch };
-    setS(next);
-    localStorage.setItem('nayul_settings', JSON.stringify(next));
-    setSaved(true);
-    setTimeout(() => setSaved(false), 1200);
+    setS((prev) => ({ ...prev, ...patch }));
+    setDirty(true);
+  };
+
+  const doSave = async () => {
+    setSaving(true);
+    const r = await saveSettings(s);
+    setSaving(false);
+    if (r.ok) {
+      setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 1500);
+      if (r.local) alert('이 기기에 저장했어요. Supabase를 연결하면 다른 기기에서도 이 설정이 유지돼요.');
+    } else {
+      alert(`저장 실패: ${r.error}`);
+    }
   };
 
   const stopSample = () => {
@@ -150,8 +154,9 @@ export default function ParentPage() {
       <div className="top">
         <a href="/" className="title">← 엄마 설정</a>
         {saved && <span className="badge" style={{ background: 'var(--grass)' }}>저장됨 ✓</span>}
+        {dirty && !saved && <span className="badge" style={{ background: 'var(--tomato)' }}>저장 안 됨</span>}
       </div>
-      <p className="sub">설정은 다음 대화부터 바로 적용돼요. 레벨은 한 번에 한 단계씩만 올리는 걸 추천해요.</p>
+      <p className="sub">바꾼 뒤 아래 💾 설정 저장을 꼭 눌러 주세요. 저장하면 다른 기기에서도 그대로 유지돼요 (Supabase 연결 시). 레벨은 한 번에 한 단계씩만 올리는 걸 추천해요.</p>
 
       <div className="card stack" style={{ gap: 4 }}>
         <Sel
@@ -255,9 +260,14 @@ export default function ParentPage() {
       </p>
 
       <div style={{ flex: 1 }} />
-      <a href="/records">
-        <button className="btn">📒 독서 기록 보기</button>
-      </a>
+      <div className="stack" style={{ marginTop: 16 }}>
+        <button className="btn green" onClick={doSave} disabled={saving || !dirty}>
+          {saving ? '저장하는 중…' : dirty ? '💾 설정 저장' : '💾 저장됨'}
+        </button>
+        <a href="/records">
+          <button className="btn">📒 독서 기록 보기</button>
+        </a>
+      </div>
     </div>
   );
 }

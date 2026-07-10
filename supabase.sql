@@ -30,3 +30,11 @@ create table if not exists nayul_library (
   transcript text
 );
 alter table nayul_library enable row level security;
+
+-- 설정 동기화 테이블 (v1.8)
+create table if not exists nayul_settings (
+  key text primary key default 'default',
+  data jsonb,
+  updated_at timestamptz default now()
+);
+alter table nayul_settings enable row level security;

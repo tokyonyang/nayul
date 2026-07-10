@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 import { libList } from '../lib/libraryClient';
+import { syncSettingsFromServer } from '../lib/settingsClient';
 
 export default function Home() {
   const router = useRouter();
@@ -16,6 +17,7 @@ export default function Home() {
 
   useEffect(() => {
     libList().then(({ books }) => setLibrary(books || []));
+    syncSettingsFromServer();
   }, []);
 
   const pickFromLibrary = (id) => {
