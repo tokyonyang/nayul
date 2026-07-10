@@ -154,6 +154,7 @@ function SessionInner() {
     return () => {
       stopAllSpeech();
       stopEar();
+      releaseMic();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -162,10 +163,33 @@ function SessionInner() {
     chatRef.current?.scrollTo({ top: chatRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, interim]);
 
-  const startEar = () => {
+  // ----- 마이크 권한을 세션 동안 유지 (권한 재요청 방지) -----
+  const micStreamRef = useRef(null);
+  const holdMicPermission = async () => {
+    if (micStreamRef.current) return true;
+    try {
+      micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const releaseMic = () => {
+    try {
+      micStreamRef.current?.getTracks().forEach((t) => t.stop());
+    } catch {}
+    micStreamRef.current = null;
+  };
+
+  const startEar = async () => {
     const SR = getSR();
     if (!SR) {
       setEarSupported(false);
+      return;
+    }
+    const ok = await holdMicPermission();
+    if (!ok) {
+      alert('마이크 권한이 필요해요. 브라우저 권한 요청에서 "허용"(앱 사용 중 허용)을 선택해 주세요.');
       return;
     }
     earActiveRef.current = true;
@@ -177,21 +201,33 @@ function SessionInner() {
       rec.lang = mode === 'en' ? 'en-US' : 'ko-KR';
       rec.continuous = true;
       rec.interimResults = true;
+      // 안드로이드 크롬은 결과 이벤트가 누적 전체를 반복 전달하므로
+      // 이어붙이지 않고 인스턴스별 최종문을 매번 다시 조립한다 (중복 방지)
+      let instFinal = '';
       rec.onresult = (e) => {
+        let fin = '';
         let interimText = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
+        for (let i = 0; i < e.results.length; i++) {
           const r = e.results[i];
-          if (r.isFinal) transcriptRef.current += r[0].transcript + ' ';
+          if (r.isFinal) fin += r[0].transcript + ' ';
           else interimText += r[0].transcript;
         }
-        if (transcriptRef.current.length > TRANSCRIPT_LIMIT + 3000) {
-          transcriptRef.current = transcriptRef.current.slice(-TRANSCRIPT_LIMIT);
-        }
-        const tail = (transcriptRef.current + interimText).slice(-70);
-        setLiveHeard(tail);
+        instFinal = fin;
+        const full = (transcriptRef.current + ' ' + instFinal + ' ' + interimText).trim();
+        setLiveHeard(full.slice(-70));
       };
-      // 모바일에서 인식이 주기적으로 끊기므로 자동 재시작
       rec.onend = () => {
+        const seg = instFinal.trim();
+        instFinal = '';
+        if (seg) {
+          // 재시작 직후 같은 구간이 그대로 다시 오는 경우 방지
+          if (!transcriptRef.current.trim().endsWith(seg)) {
+            transcriptRef.current = (transcriptRef.current + ' ' + seg).trim();
+          }
+          if (transcriptRef.current.length > TRANSCRIPT_LIMIT + 3000) {
+            transcriptRef.current = transcriptRef.current.slice(-TRANSCRIPT_LIMIT);
+          }
+        }
         if (earActiveRef.current) setTimeout(run, 250);
       };
       rec.onerror = (e) => {
@@ -250,6 +286,7 @@ function SessionInner() {
 
   const finishReading = () => {
     stopEar();
+    holdMicPermission();
     setPhase('talk');
     const heard = transcriptRef.current.trim().slice(-TRANSCRIPT_LIMIT);
     noContentRef.current =
@@ -272,6 +309,7 @@ function SessionInner() {
 
   const skipReading = () => {
     stopEar();
+    holdMicPermission();
     setPhase('talk');
     const saved = (bookInfo?.savedTranscript || '').trim();
     noContentRef.current = saved.length <= 200 && !(bookInfo?.description && bookInfo.description.length > 50);
@@ -298,12 +336,18 @@ function SessionInner() {
 
   // ----- 아이 말하기 STT -----
   // 아이가 말 중간에 뜸을 들여도 끊기지 않도록:
-  // continuous + 침묵으로 인식이 끊기면 자동 재시작(전송 안 함) + 누적.
+  // 자동 재시작(전송 안 함) + 세그먼트 누적. 안드로이드 크롬의 결과 중복 버그에 대응해
+  // 이어붙이지 않고 인스턴스별로 매번 다시 조립한다.
   // 전송은 (1) 버튼을 다시 눌렀을 때 또는 (2) 말한 내용이 있고 7초간 완전 침묵일 때.
   const talkActiveRef = useRef(false);
-  const talkFinalRef = useRef('');
+  const talkSegmentsRef = useRef([]); // 확정된 세그먼트들
+  const talkInstFinalRef = useRef(''); // 현재 인스턴스의 최종문 (매 이벤트 재조립)
+  const pendingSendRef = useRef(false);
   const silenceTimerRef = useRef(null);
   const SILENCE_SEND_MS = 7000;
+
+  const talkText = () =>
+    (talkSegmentsRef.current.join(' ') + ' ' + talkInstFinalRef.current).replace(/\s+/g, ' ').trim();
 
   const clearSilenceTimer = () => {
     if (silenceTimerRef.current) {
@@ -314,13 +358,23 @@ function SessionInner() {
 
   const armSilenceTimer = () => {
     clearSilenceTimer();
-    if (!talkFinalRef.current.trim()) return; // 아직 아무 말도 없으면 자동 전송 안 함
+    if (!talkText()) return; // 아직 아무 말도 없으면 자동 전송 안 함
     silenceTimerRef.current = setTimeout(() => {
       if (talkActiveRef.current) stopListening();
     }, SILENCE_SEND_MS);
   };
 
-  const startListening = () => {
+  const flushSend = () => {
+    const finalText = talkText();
+    talkSegmentsRef.current = [];
+    talkInstFinalRef.current = '';
+    pendingSendRef.current = false;
+    setListening(false);
+    setInterim('');
+    if (finalText) send(finalText);
+  };
+
+  const startListening = async () => {
     if (busy) return;
     stopAllSpeech();
     const SR = getSR();
@@ -329,8 +383,16 @@ function SessionInner() {
       setTypedMode(true);
       return;
     }
+    // 권한을 세션 동안 붙잡아 재요청 방지. "이번만 허용" 말고 "허용"을 선택해야 안 뜸.
+    const ok = await holdMicPermission();
+    if (!ok) {
+      alert('마이크 권한이 필요해요. 권한 요청이 계속 뜬다면 "이번만"이 아니라 "앱 사용 중 허용"을 선택해 주세요.');
+      return;
+    }
     talkActiveRef.current = true;
-    talkFinalRef.current = '';
+    talkSegmentsRef.current = [];
+    talkInstFinalRef.current = '';
+    pendingSendRef.current = false;
     setListening(true);
     setInterim('');
 
@@ -343,17 +405,29 @@ function SessionInner() {
       rec.interimResults = true;
       rec.maxAlternatives = 1;
       rec.onresult = (e) => {
+        let fin = '';
         let interimText = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
+        for (let i = 0; i < e.results.length; i++) {
           const r = e.results[i];
-          if (r.isFinal) talkFinalRef.current += r[0].transcript + ' ';
+          if (r.isFinal) fin += r[0].transcript + ' ';
           else interimText += r[0].transcript;
         }
-        setInterim((talkFinalRef.current + interimText).trim());
+        talkInstFinalRef.current = fin; // 재조립 (누적 아님 → 중복 불가)
+        setInterim((talkText() + ' ' + interimText).replace(/\s+/g, ' ').trim());
         armSilenceTimer();
       };
-      // 침묵/타임아웃으로 인식이 끊겨도 전송하지 않고 조용히 다시 듣는다
       rec.onend = () => {
+        // 인스턴스 종료 → 최종문을 세그먼트로 확정 (직전 세그먼트와 같으면 중복으로 보고 버림)
+        const seg = talkInstFinalRef.current.trim();
+        talkInstFinalRef.current = '';
+        if (seg && talkSegmentsRef.current[talkSegmentsRef.current.length - 1] !== seg) {
+          talkSegmentsRef.current.push(seg);
+        }
+        if (pendingSendRef.current) {
+          flushSend();
+          return;
+        }
+        // 침묵/타임아웃으로 끊긴 경우 → 전송하지 않고 조용히 다시 듣는다
         if (talkActiveRef.current) setTimeout(run, 200);
       };
       rec.onerror = (e) => {
@@ -376,14 +450,16 @@ function SessionInner() {
   const stopListening = () => {
     talkActiveRef.current = false;
     clearSilenceTimer();
+    pendingSendRef.current = true;
     try {
-      recRef.current?.stop();
-    } catch {}
-    setListening(false);
-    setInterim('');
-    const finalText = talkFinalRef.current.trim();
-    talkFinalRef.current = '';
-    if (finalText) send(finalText);
+      recRef.current?.stop(); // onend에서 마지막 세그먼트 확정 후 flushSend
+    } catch {
+      flushSend();
+    }
+    // onend가 오지 않는 브라우저 대비 안전장치
+    setTimeout(() => {
+      if (pendingSendRef.current) flushSend();
+    }, 700);
   };
 
   // ----- 종료 & 피드백 -----
@@ -391,10 +467,13 @@ function SessionInner() {
     stopAllSpeech();
     talkActiveRef.current = false;
     clearSilenceTimer();
-    talkFinalRef.current = '';
+    pendingSendRef.current = false;
+    talkSegmentsRef.current = [];
+    talkInstFinalRef.current = '';
     try {
       recRef.current?.stop();
     } catch {}
+    releaseMic();
     setListening(false);
     setInterim('');
     const msgs = [
