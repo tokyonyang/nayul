@@ -7,6 +7,7 @@ const DEFAULTS = {
   ko: 2,
   en: 1,
   depth: 'normal',
+  stt: 'auto',
   koTts: 'device',
   enTts: 'device',
   googleVoice: 'ko-KR-Chirp3-HD-Aoede',
@@ -181,6 +182,15 @@ export default function ParentPage() {
             [2, 'E2 — 주어+동사 짧은 문장'],
             [3, 'E3 — 두 문장 연결·순서'],
             [4, 'E4 — 의견·간단한 토론'],
+          ]}
+        />
+        <Sel
+          label="🎤 음성 인식 방식"
+          field="stt"
+          options={[
+            ['auto', '자동 — 아이폰은 정확 인식, 그 외 브라우저 인식 (기본)'],
+            ['web', '브라우저 인식 — 빠르고 실시간 자막, 안드로이드 크롬 최적'],
+            ['whisper', '정확 인식(AI 전사) — 아이폰 권장, 자막은 말이 끝난 뒤'],
           ]}
         />
         <Sel

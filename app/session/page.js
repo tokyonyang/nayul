@@ -114,6 +114,26 @@ function getSR() {
     : null;
 }
 
+const isIOS =
+  typeof navigator !== 'undefined' &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+// 인식 방식: auto → 아이폰은 정확 인식(녹음+전사), 그 외 브라우저 인식
+function resolveStt(settings) {
+  const v = settings?.stt || 'auto';
+  if (v === 'auto') return isIOS ? 'whisper' : 'web';
+  return v;
+}
+
+function pickRecorderMime() {
+  if (typeof MediaRecorder === 'undefined') return '';
+  for (const t of ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return '';
+}
+
 function SessionInner() {
   const params = useSearchParams();
   const mode = params.get('mode') === 'en' ? 'en' : 'ko';
@@ -154,6 +174,8 @@ function SessionInner() {
     return () => {
       stopAllSpeech();
       stopEar();
+      earActiveRef.current = false;
+      clearTimeout(earCycleTimerRef?.current);
       releaseMic();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -165,7 +187,10 @@ function SessionInner() {
 
   // ----- 마이크 권한을 세션 동안 유지 (권한 재요청 방지) -----
   const micStreamRef = useRef(null);
-  const holdMicPermission = async () => {
+  // forRecorder=true(정확 인식용)면 항상 스트림 확보.
+  // 브라우저 인식용은 iOS에서 스트림을 붙잡으면 인식기와 마이크 충돌 → iOS는 붙잡지 않음.
+  const holdMicPermission = async (forRecorder = false) => {
+    if (!forRecorder && isIOS) return true;
     if (micStreamRef.current) return true;
     try {
       micStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -199,7 +224,7 @@ function SessionInner() {
       const rec = new SR();
       earRecRef.current = rec;
       rec.lang = mode === 'en' ? 'en-US' : 'ko-KR';
-      rec.continuous = true;
+      rec.continuous = !isIOS;
       rec.interimResults = true;
       // 안드로이드 크롬은 결과 이벤트가 누적 전체를 반복 전달하므로
       // 이어붙이지 않고 인스턴스별 최종문을 매번 다시 조립한다 (중복 방지)
@@ -401,7 +426,7 @@ function SessionInner() {
       const rec = new SR();
       recRef.current = rec;
       rec.lang = listenLang;
-      rec.continuous = true;
+      rec.continuous = !isIOS;
       rec.interimResults = true;
       rec.maxAlternatives = 1;
       rec.onresult = (e) => {
@@ -462,6 +487,139 @@ function SessionInner() {
     }, 700);
   };
 
+  // ----- 정확 인식 모드 (녹음 → OpenAI 전사) : 아이폰 기본 -----
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const mediaRecRef = useRef(null);
+  const recTimerRef = useRef(null);
+
+  const transcribeBlob = async (blob) => {
+    const fd = new FormData();
+    fd.append('audio', blob, 'audio');
+    fd.append('lang', listenLang.startsWith('en') ? 'en' : 'ko');
+    const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return (data.text || '').trim();
+  };
+
+  const startRecording = async () => {
+    if (busy || transcribing) return;
+    stopAllSpeech();
+    if (typeof MediaRecorder === 'undefined') {
+      alert('이 브라우저는 녹음을 지원하지 않아요. 설정에서 인식 방식을 브라우저 인식으로 바꿔 주세요.');
+      return;
+    }
+    const ok = await holdMicPermission(true);
+    if (!ok) {
+      alert('마이크 권한이 필요해요. 권한 요청에서 "허용"을 선택해 주세요.');
+      return;
+    }
+    const mime = pickRecorderMime();
+    const mr = new MediaRecorder(micStreamRef.current, mime ? { mimeType: mime } : undefined);
+    mediaRecRef.current = mr;
+    const chunks = [];
+    mr.ondataavailable = (e) => {
+      if (e.data && e.data.size) chunks.push(e.data);
+    };
+    mr.onstop = async () => {
+      clearTimeout(recTimerRef.current);
+      setRecording(false);
+      const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+      if (blob.size < 3000) return; // 너무 짧은 녹음은 무시
+      setTranscribing(true);
+      try {
+        const text = await transcribeBlob(blob);
+        if (text) send(text);
+      } catch (e) {
+        setMessages((m) => [...m, { role: 'sys', content: `⚠️ 음성 인식 실패: ${e.message}` }]);
+      } finally {
+        setTranscribing(false);
+      }
+    };
+    mr.start();
+    setRecording(true);
+    // 안전장치: 최대 90초
+    recTimerRef.current = setTimeout(() => {
+      if (mediaRecRef.current?.state === 'recording') mediaRecRef.current.stop();
+    }, 90000);
+  };
+
+  const stopRecording = () => {
+    try {
+      if (mediaRecRef.current?.state === 'recording') mediaRecRef.current.stop();
+    } catch {}
+  };
+
+  // ----- 마이크 버튼 디스패처: 설정에 따라 방식 선택 -----
+  const sttMode = resolveStt(settings);
+  const micActive = sttMode === 'whisper' ? recording : listening;
+  const micBusy = busy || transcribing;
+  const micStart = sttMode === 'whisper' ? startRecording : startListening;
+  const micStop = sttMode === 'whisper' ? stopRecording : stopListening;
+
+  // ----- 같이 듣기 (정확 인식): 60초 단위로 끊어 전사 누적 -----
+  const earMediaRef = useRef(null);
+  const earCycleTimerRef = useRef(null);
+
+  const startEarWhisper = async () => {
+    if (typeof MediaRecorder === 'undefined') {
+      setEarSupported(false);
+      return;
+    }
+    const ok = await holdMicPermission(true);
+    if (!ok) {
+      alert('마이크 권한이 필요해요. 권한 요청에서 "허용"을 선택해 주세요.');
+      return;
+    }
+    earActiveRef.current = true;
+    setEarOn(true);
+    const cycle = () => {
+      if (!earActiveRef.current || !micStreamRef.current) return;
+      const mime = pickRecorderMime();
+      const mr = new MediaRecorder(micStreamRef.current, mime ? { mimeType: mime } : undefined);
+      earMediaRef.current = mr;
+      const chunks = [];
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size) chunks.push(e.data);
+      };
+      mr.onstop = async () => {
+        clearTimeout(earCycleTimerRef.current);
+        const blob = new Blob(chunks, { type: mr.mimeType || 'audio/webm' });
+        if (blob.size > 3000) {
+          try {
+            const text = await transcribeBlob(blob);
+            if (text) {
+              transcriptRef.current = (transcriptRef.current + ' ' + text).trim();
+              if (transcriptRef.current.length > TRANSCRIPT_LIMIT + 3000) {
+                transcriptRef.current = transcriptRef.current.slice(-TRANSCRIPT_LIMIT);
+              }
+              setLiveHeard(transcriptRef.current.slice(-70));
+            }
+          } catch {}
+        }
+        if (earActiveRef.current) cycle();
+      };
+      mr.start();
+      earCycleTimerRef.current = setTimeout(() => {
+        if (mr.state === 'recording') mr.stop();
+      }, 60000);
+    };
+    cycle();
+  };
+
+  const stopEarWhisper = () => {
+    earActiveRef.current = false;
+    setEarOn(false);
+    clearTimeout(earCycleTimerRef.current);
+    try {
+      if (earMediaRef.current?.state === 'recording') earMediaRef.current.stop();
+    } catch {}
+  };
+
+  const earStart = sttMode === 'whisper' ? startEarWhisper : startEar;
+  const earStop = sttMode === 'whisper' ? stopEarWhisper : stopEar;
+
   // ----- 종료 & 피드백 -----
   const endSession = () => {
     stopAllSpeech();
@@ -473,6 +631,10 @@ function SessionInner() {
     try {
       recRef.current?.stop();
     } catch {}
+    try {
+      if (mediaRecRef.current?.state === 'recording') mediaRecRef.current.stop();
+    } catch {}
+    stopEarWhisper();
     releaseMic();
     setListening(false);
     setInterim('');
@@ -573,7 +735,7 @@ function SessionInner() {
         )}
         {earSupported && (
           <div className="card center" style={{ marginBottom: 14 }}>
-            <button className={`btn ${earOn ? 'red' : 'green'}`} onClick={earOn ? stopEar : startEar}>
+            <button className={`btn ${earOn ? 'red' : 'green'}`} onClick={earOn ? earStop : earStart}>
               {earOn ? '👂 듣는 중… (탭하면 멈춤)' : '👂 같이 듣기 시작'}
             </button>
             {earOn && (
@@ -664,16 +826,18 @@ function SessionInner() {
           {!typedMode ? (
             <>
               <button
-                className={`mic ${listening ? 'listening' : busy ? 'busy' : ''}`}
-                onClick={listening ? stopListening : startListening}
-                disabled={busy}
+                className={`mic ${micActive ? 'listening' : micBusy ? 'busy' : ''}`}
+                onClick={micActive ? micStop : micStart}
+                disabled={micBusy}
                 aria-label="말하기"
               >
-                {listening ? '👂' : '🎤'}
+                {micActive ? '👂' : '🎤'}
               </button>
               <div className="micHint">
-                {listening
+                {micActive
                   ? '듣는 중이에요 — 천천히 말해도 괜찮아요. 다 말하면 버튼을 눌러 주세요!'
+                  : transcribing
+                  ? '나율이 말을 글로 옮기는 중…'
                   : busy
                   ? '생각하는 중…'
                   : '버튼을 누르고 말해 보세요'}
