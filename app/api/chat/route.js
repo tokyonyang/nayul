@@ -2,7 +2,7 @@ import { buildSystemPrompt } from '../../../lib/prompt';
 
 export async function POST(req) {
   try {
-    const { history, mode, bookTitle, settings, bookInfo } = await req.json();
+    const { history, mode, bookTitle, settings, bookInfo, noContentInfo } = await req.json();
 
     if (!process.env.OPENAI_API_KEY) {
       return Response.json(
@@ -12,7 +12,7 @@ export async function POST(req) {
     }
 
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ mode, bookTitle, settings, bookInfo }) },
+      { role: 'system', content: buildSystemPrompt({ mode, bookTitle, settings, bookInfo, noContentInfo }) },
       ...(history || []).slice(-40),
     ];
 

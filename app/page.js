@@ -2,6 +2,8 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useEffect } from 'react';
+import { libList } from '../lib/libraryClient';
 
 export default function Home() {
   const router = useRouter();
@@ -10,6 +12,19 @@ export default function Home() {
   const [results, setResults] = useState(null);
   const [selected, setSelected] = useState(null);
   const [searching, setSearching] = useState(false);
+  const [library, setLibrary] = useState([]);
+
+  useEffect(() => {
+    libList().then(({ books }) => setLibrary(books || []));
+  }, []);
+
+  const pickFromLibrary = (id) => {
+    const b = library.find((x) => String(x.id) === id);
+    if (!b) return;
+    setSelected({ ...b, libraryId: b.id, savedTranscript: b.transcript || '' });
+    setTitle(b.title);
+    setResults(null);
+  };
 
   const search = async () => {
     if (!title.trim()) return;
@@ -56,6 +71,19 @@ export default function Home() {
       <p className="sub center">오늘은 어떤 책을 읽을까?</p>
 
       <div className="stack" style={{ flex: 1 }}>
+        {library.length > 0 && (
+          <select className="input" defaultValue="" onChange={(e) => pickFromLibrary(e.target.value)}>
+            <option value="" disabled>
+              📚 우리집 서재에서 고르기 ({library.length}권)
+            </option>
+            {library.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.title}
+                {b.transcript && b.transcript.length > 100 ? ' 👂' : ''}
+              </option>
+            ))}
+          </select>
+        )}
         <input
           className="input"
           placeholder="책 제목"
@@ -128,14 +156,19 @@ export default function Home() {
         <button className="btn big" onClick={() => start('en')}>
           🔤 English Book!
         </button>
-        {selected?.description && (
+        {selected && (selected.description || (selected.savedTranscript && selected.savedTranscript.length > 200)) && (
           <p className="sub center" style={{ margin: 0 }}>
-            ✅ 책 소개를 찾았어요 — 읽기를 건너뛰고 바로 이야기할 수도 있어요!
+            ✅ {selected.savedTranscript && selected.savedTranscript.length > 200
+              ? '지난번에 읽어준 내용을 기억하는 책이에요 — 바로 이야기할 수 있어요!'
+              : '책 소개를 찾았어요 — 읽기를 건너뛰고 바로 이야기할 수도 있어요!'}
           </p>
         )}
       </div>
 
       <div className="row" style={{ justifyContent: 'center', marginTop: 24 }}>
+        <button className="btn ghost" onClick={() => parentGate('/library')}>
+          📚 서재
+        </button>
         <button className="btn ghost" onClick={() => parentGate('/records')}>
           📒 독서 기록
         </button>

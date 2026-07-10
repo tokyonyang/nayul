@@ -2,6 +2,7 @@
 
 import { Suspense, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { libSaveTranscript } from '../../lib/libraryClient';
 
 const DEFAULT_SETTINGS = { think: 2, ko: 2, en: 1, depth: 'normal' };
 const TRANSCRIPT_LIMIT = 15000; // 전사 최대 길이 (토큰 보호)
@@ -132,6 +133,7 @@ function SessionInner() {
   const [saveNote, setSaveNote] = useState('');
   const recRef = useRef(null);
   const chatRef = useRef(null);
+  const noContentRef = useRef(true); // 책 내용 정보(소개/저장 전사/이번 전사) 유무
 
   // ----- 같이 듣기 (읽어주기 전사) -----
   const [earOn, setEarOn] = useState(false);
@@ -221,7 +223,14 @@ function SessionInner() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ history, mode, bookTitle, bookInfo, settings: loadSettings() }),
+        body: JSON.stringify({
+          history,
+          mode,
+          bookTitle,
+          bookInfo,
+          noContentInfo: noContentRef.current,
+          settings: loadSettings(),
+        }),
       });
       const data = await res.json();
       if (data.error) {
@@ -243,6 +252,14 @@ function SessionInner() {
     stopEar();
     setPhase('talk');
     const heard = transcriptRef.current.trim().slice(-TRANSCRIPT_LIMIT);
+    noContentRef.current =
+      heard.length <= 200 &&
+      !(bookInfo?.description && bookInfo.description.length > 50) &&
+      !(bookInfo?.savedTranscript && bookInfo.savedTranscript.length > 200);
+    // 서재 책이면 전사를 자동 저장 → 다음번엔 읽지 않아도 내용을 기억
+    if (heard.length > 200 && bookInfo?.libraryId) {
+      libSaveTranscript(bookInfo.libraryId, heard).catch(() => {});
+    }
     let content =
       mode === 'en' ? 'We finished the book. Now you can talk.' : '책 다 읽었어. 이제 이야기해도 돼.';
     if (heard.length > 30) {
@@ -256,10 +273,15 @@ function SessionInner() {
   const skipReading = () => {
     stopEar();
     setPhase('talk');
-    const content =
+    const saved = (bookInfo?.savedTranscript || '').trim();
+    noContentRef.current = saved.length <= 200 && !(bookInfo?.description && bookInfo.description.length > 50);
+    let content =
       mode === 'en'
-        ? 'We already know this book well. Please start the havruta talk based on the verified book info.'
-        : '이 책은 우리가 이미 잘 아는 책이야. 검색으로 확인된 책 정보를 바탕으로 바로 하브루타 대화를 시작해 줘.';
+        ? 'We already know this book well. Please start the havruta talk based on the known book content.'
+        : '이 책은 우리가 이미 잘 아는 책이야. 알고 있는 책 내용을 바탕으로 바로 하브루타 대화를 시작해 줘.';
+    if (saved.length > 200) {
+      content += `\n\n[앱 자동 첨부: 지난 독서에서 엄마가 읽어준 내용의 음성 전사. 이것을 책의 실제 내용으로 사용]\n${saved.slice(-TRANSCRIPT_LIMIT)}`;
+    }
     const msgs = [{ role: 'user', content }];
     setMessages(msgs);
     callChat(msgs);
@@ -458,6 +480,18 @@ function SessionInner() {
             : '이 브라우저는 같이 듣기를 지원하지 않아요.'}
         </p>
 
+        {!(bookInfo?.description?.length > 50) && !(bookInfo?.savedTranscript?.length > 200) && (
+          <div
+            className="card center"
+            style={{ marginBottom: 10, background: '#FFF3D6', border: '2px solid var(--bus-deep)' }}
+          >
+            <strong style={{ fontSize: 15 }}>📕 아직 내용 정보가 없는 책이에요</strong>
+            <p className="sub" style={{ margin: '6px 0 0', fontSize: 13.5 }}>
+              전집(프뢰벨 등)은 검색이 안 되는 경우가 많아요. 👂 같이 듣기를 꼭 켜주세요 — 한 번만 들으면
+              다음부터는 내용을 기억해요! (안 켜도 AI가 나율이의 대답을 따라가며 안전하게 질문해요)
+            </p>
+          </div>
+        )}
         {earSupported && (
           <div className="card center" style={{ marginBottom: 14 }}>
             <button className={`btn ${earOn ? 'red' : 'green'}`} onClick={earOn ? stopEar : startEar}>
@@ -492,9 +526,12 @@ function SessionInner() {
           <button className="btn big yellow" onClick={finishReading}>
             다 읽었어! 이제 얘기하자 🎉
           </button>
-          {bookInfo?.description && bookInfo.description.length > 50 && (
+          {((bookInfo?.description && bookInfo.description.length > 50) ||
+            (bookInfo?.savedTranscript && bookInfo.savedTranscript.length > 200)) && (
             <button className="btn" onClick={skipReading}>
-              ⏭️ 이미 잘 아는 책 — 읽기 없이 바로 이야기
+              {bookInfo?.savedTranscript && bookInfo.savedTranscript.length > 200
+                ? '👂 지난번 읽은 내용 기억해요 — 바로 이야기'
+                : '⏭️ 이미 잘 아는 책 — 읽기 없이 바로 이야기'}
             </button>
           )}
         </div>
